@@ -1,240 +1,238 @@
-let currentStep = 1;
-let selectedMethod = '';
-let transferData = {};
+// --- Global State ---
+let currentTransferType = '';
 let currentUser = null;
 let userAccounts = [];
 
-window.addEventListener('load', initializeTransfer);
+// Stored details for pending transfer
+let pendingTransfer = {
+    amount: 0,
+    recipientDisplay: '',
+    fromAccountNum: '' // Added this to track which account to debit
+};
 
-async function initializeTransfer() {
-    const userId = localStorage.getItem('userId');
-    const token = localStorage.getItem('authToken');
+// --- Elements ---
+const pageTitle = document.getElementById('pageTitle');
+const optionsList = document.getElementById('transferOptions');
+const formContainer = document.getElementById('transferFormContainer');
+const formHeader = document.getElementById('formHeaderTitle');
+const dynamicInputs = document.getElementById('dynamicInputs');
+const fromAccountSelect = document.getElementById('fromAccountSelect');
+const receiptContainer = document.getElementById('receiptContainer');
 
-    if (!userId || !token) {
-        window.location.href = 'login.html';
+// --- Modal Elements ---
+const securityModal = document.getElementById('securityModal');
+const securityMessage = document.getElementById('securityMessage');
+const authModal = document.getElementById('authModal');
+const authNameDisplay = document.getElementById('authNameDisplay');
+const authCodeInput = document.getElementById('authCodeInput');
+const authErrorMsg = document.getElementById('authErrorMsg');
+
+// --- Initialization ---
+window.addEventListener('load', async () => {
+    const userId = sessionStorage.getItem('userId');
+    if (!userId) { window.location.href = 'login.html'; return; }
+
+    try {
+        const res = await fetch(`/api/user-data?userId=${userId}`);
+        const data = await res.json();
+        
+        if (data.success) {
+            currentUser = data.user; 
+            userAccounts = data.accounts;
+            populateFromAccounts();
+        }
+    } catch (err) { console.error('Failed to load user data'); }
+});
+
+function populateFromAccounts() {
+    fromAccountSelect.innerHTML = '';
+    if (userAccounts.length === 0) {
+        const option = document.createElement('option');
+        option.text = "No accounts available";
+        fromAccountSelect.add(option);
         return;
     }
 
-    try {
-        const userRes = await fetch(`/api/user/${userId}`, { headers: { 'Authorization': token } });
-        currentUser = await userRes.json();
-
-        const accRes = await fetch(`/api/accounts/${userId}`, { headers: { 'Authorization': token } });
-        userAccounts = await accRes.json();
-
-        const select = document.getElementById('fromAccount');
-        select.innerHTML = '<option value="">Select Account...</option>';
-        userAccounts.forEach(acc => {
-            const opt = document.createElement('option');
-            opt.value = acc.accountId;
-            opt.innerText = `${acc.accountName} - $${acc.availableBalance.toFixed(2)}`;
-            select.appendChild(opt);
-        });
-    } catch (err) { console.error(err); }
+    userAccounts.forEach(acc => {
+        const last4 = acc.accountNumber.slice(-4);
+        const bal = acc.balance.toLocaleString('en-US', {style:'currency', currency:'USD'});
+        const option = document.createElement('option');
+        option.value = acc.accountNumber;
+        option.text = `${acc.accountName} ...${last4} (${bal})`;
+        fromAccountSelect.add(option);
+    });
 }
 
-function selectMethod(el, method) {
-    document.querySelectorAll('.payment-method').forEach(e => e.classList.remove('selected'));
-    el.classList.add('selected');
-    selectedMethod = method;
-}
+function openForm(type) {
+    currentTransferType = type;
+    optionsList.style.display = 'none';
+    formContainer.style.display = 'block';
+    pageTitle.style.display = 'none';
+    dynamicInputs.innerHTML = ''; 
 
-function nextStep(step) {
-    if (step === 1) {
-        if (!document.getElementById('fromAccount').value) return alert('Please select an account.');
-        transferData.fromAccountId = document.getElementById('fromAccount').value;
-    } 
-    else if (step === 2) {
-        if (!selectedMethod) return alert('Please select a transfer method.');
-        document.querySelectorAll('[id^="fields-"]').forEach(d => d.style.display = 'none');
-        document.getElementById(`fields-${selectedMethod}`).style.display = 'block';
-    } 
-    else if (step === 3) {
-        if (!validateFields()) return;
-        
-        // INTERCEPT: Show appropriate receipt modal
-        if (selectedMethod === 'zelle') {
-            showZelleReceipt();
-        } else {
-            showStandardReview();
-        }
-        return; // Don't proceed to old step 4
+    if (type === 'internal') {
+        formHeader.textContent = 'Internal Transfer';
+        dynamicInputs.innerHTML = `
+            <div class="form-group"><label class="form-label">To Account</label><select class="form-select"><option>Select internal account...</option><option>Checking ...9921</option><option>Savings ...5582</option></select></div>`;
+    } else if (type === 'external') {
+        formHeader.textContent = 'Transfer to Other Bank';
+        dynamicInputs.innerHTML = `
+            <div class="form-group"><label class="form-label">Bank Name</label><input type="text" class="form-input" id="extBankName" placeholder="e.g. Chase"></div>
+            <div class="form-group"><label class="form-label">Account Name</label><input type="text" class="form-input" id="extAccountName" placeholder="Name on account"></div>
+            <div class="form-group"><label class="form-label">Routing Number</label><input type="text" class="form-input" id="extRouting" placeholder="9-digit routing"></div>
+            <div class="form-group"><label class="form-label">Account Number</label><input type="text" class="form-input" id="recipientInput" placeholder="Account number"></div>`;
+    } else if (type === 'zelle') {
+        formHeader.textContent = 'Send with Zelle®';
+        dynamicInputs.innerHTML = `
+            <div class="form-group"><label class="form-label">Recipient Email or Mobile</label><input type="text" class="form-input" id="recipientInput" placeholder="email@example.com"></div>`;
+    } else if (type === 'wire') {
+        formHeader.textContent = 'Wire Transfer';
+        dynamicInputs.innerHTML = `
+            <div class="form-group"><label class="form-label">Recipient Name</label><input type="text" class="form-input" id="recipientInput" placeholder="Full legal name"></div>
+            <div class="form-group"><label class="form-label">Bank Name</label><input type="text" class="form-input" id="wireBankName" placeholder="Destination Bank"></div>
+            <div class="form-group"><label class="form-label">SWIFT / BIC Code</label><input type="text" class="form-input" id="wireSwift" placeholder="SWIFT Code"></div>
+            <div class="form-group"><label class="form-label">IBAN / Account Number</label><input type="text" class="form-input" id="wireIban" placeholder="IBAN or Account #"></div>
+            <div class="form-group"><label class="form-label">Recipient Address</label><input type="text" class="form-input" id="wireAddress" placeholder="Street, City, Country"></div>`;
     }
+}
 
-    // Only needed for Step 1->2 and 2->3
-    document.getElementById(`section${currentStep}`).classList.remove('active');
-    document.getElementById(`step${currentStep}`).classList.add('completed');
-    document.getElementById(`step${currentStep}`).classList.remove('active');
+function closeForm() {
+    formContainer.style.display = 'none';
+    optionsList.style.display = 'flex';
+    pageTitle.style.display = 'block';
+    document.getElementById('activeTransferForm').reset();
+}
+
+function showSecurityModal(message) {
+    securityMessage.textContent = message;
+    securityModal.style.display = 'flex';
+}
+function closeSecurityModal() { securityModal.style.display = 'none'; }
+
+function showAuthModal() {
+    if (currentUser.authVerification && currentUser.authVerification.authName) {
+        authNameDisplay.textContent = currentUser.authVerification.authName;
+    } else {
+        authNameDisplay.textContent = "Security Code";
+    }
     
-    currentStep++;
-    document.getElementById(`section${currentStep}`).classList.add('active');
-    document.getElementById(`step${currentStep}`).classList.add('active');
+    authErrorMsg.style.display = 'none';
+    authCodeInput.value = '';
+    authModal.style.display = 'flex';
+}
+function closeAuthModal() { authModal.style.display = 'none'; }
+
+function verifyAuthCode() {
+    const enteredCode = authCodeInput.value.trim();
+    const correctCode = currentUser.authVerification.authCode;
+
+    if (enteredCode === correctCode) {
+        closeAuthModal();
+        completeTransfer(); // Valid code -> Process backend transfer
+    } else {
+        authErrorMsg.style.display = 'block';
+    }
 }
 
-function prevStep(step) {
-    document.getElementById(`section${currentStep}`).classList.remove('active');
-    document.getElementById(`step${currentStep}`).classList.remove('active');
-    currentStep--;
-    document.getElementById(`section${currentStep}`).classList.add('active');
-    document.getElementById(`step${currentStep}`).classList.add('active');
-    document.getElementById(`step${currentStep}`).classList.remove('completed');
-}
+function processTransfer(event) {
+    event.preventDefault(); 
 
-function validateFields() {
-    let isValid = true;
-    transferData.method = selectedMethod; // Sync
-
-    if (selectedMethod === 'zelle') {
-        const name = document.getElementById('zelleName').value;
-        const contact = document.getElementById('zelleContact').value;
-        const amt = document.getElementById('zelleAmount').value;
-        if(!name || !contact || !amt) isValid = false;
-        
-        transferData.zelleData = { name, contact, amount: parseFloat(amt) };
-        transferData.amount = parseFloat(amt);
-        transferData.recipientName = name;
-        transferData.type = 'zelle';
-    }
-    else if (selectedMethod === 'mybank') {
-        const name = document.getElementById('mbName').value;
-        const acct = document.getElementById('mbAccount').value;
-        const rout = document.getElementById('mbRouting').value;
-        const amt = document.getElementById('mbAmount').value;
-        if(!name || !acct || !rout || !amt) isValid = false;
-        
-        transferData.recipientName = name;
-        transferData.bankName = "Bank of America";
-        transferData.accountNumber = acct;
-        transferData.routing = rout;
-        transferData.amount = parseFloat(amt);
-        transferData.type = 'internal';
-    }
-    else if (selectedMethod === 'otherbank' || selectedMethod === 'wire') {
-        const name = document.getElementById(selectedMethod === 'wire' ? 'wireName' : 'obName').value;
-        const bank = document.getElementById(selectedMethod === 'wire' ? 'wireBankName' : 'obBank').value;
-        const acct = document.getElementById(selectedMethod === 'wire' ? 'wireAccount' : 'obAccount').value;
-        const amt = document.getElementById(selectedMethod === 'wire' ? 'wireAmount' : 'obAmount').value;
-        
-        if(!name || !bank || !acct || !amt) isValid = false;
-        
-        transferData.recipientName = name;
-        transferData.bankName = bank;
-        transferData.accountNumber = acct;
-        transferData.amount = parseFloat(amt);
-        transferData.type = 'transfer';
-        
-        if(selectedMethod === 'wire') {
-            transferData.swift = document.getElementById('wireSwift').value;
-            transferData.address = document.getElementById('wireAddress').value;
+    // 1. CHECK SECURITY
+    if (currentUser) {
+        if (currentUser.status === 'frozen') {
+            showSecurityModal("Account frozen, contact live chat support for more information.");
+            return;
+        }
+        if (currentUser.status === 'suspended') {
+            showSecurityModal("Account suspended, contact live chat support for more information.");
+            return;
         }
     }
 
-    if (!isValid) alert('Please fill in all required fields.');
-    transferData.description = document.getElementById('transferNote').value;
-    return isValid;
-}
-
-// --- ZELLE RECEIPT ---
-function showZelleReceipt() {
-    const data = transferData.zelleData;
-    document.getElementById('zelleAvatar').textContent = data.name.charAt(0).toUpperCase();
-    document.getElementById('zelleReceiptAmount').textContent = `$${data.amount.toFixed(2)}`;
-    document.getElementById('zelleReceiptName').textContent = data.name;
-    document.getElementById('zelleReceiptPhone').textContent = data.contact;
-    document.getElementById('zelleReceiptEnrolled').textContent = `Enrolled as ${data.name}`;
-    document.getElementById('zelleReceiptModal').classList.add('show');
-}
-function closeZelleReceipt() { document.getElementById('zelleReceiptModal').classList.remove('show'); }
-
-// --- STANDARD REVIEW RECEIPT ---
-function showStandardReview() {
-    const fromAcc = userAccounts.find(a => a.accountId == transferData.fromAccountId);
-    const fromName = fromAcc ? `${fromAcc.accountName} (...${fromAcc.accountNumber.slice(-4)})` : 'Selected Account';
-    
-    document.getElementById('stdReviewAmount').textContent = `$${transferData.amount.toFixed(2)}`;
-    
-    // Set Icon & Title
-    const iconMap = { 'mybank': '🏦', 'otherbank': '🏛️', 'wire': '📡' };
-    const titleMap = { 'mybank': 'Internal Transfer', 'otherbank': 'External Transfer', 'wire': 'Wire Transfer' };
-    document.getElementById('stdReviewIcon').textContent = iconMap[selectedMethod];
-    document.getElementById('stdReviewTitle').textContent = titleMap[selectedMethod];
-
-    // Build Details Rows
-    let html = `
-        <div class="std-receipt-row"><span class="std-receipt-label">From Account</span><span class="std-receipt-value">${fromName}</span></div>
-        <div class="std-receipt-row"><span class="std-receipt-label">Recipient</span><span class="std-receipt-value">${transferData.recipientName}</span></div>
-        <div class="std-receipt-row"><span class="std-receipt-label">Bank</span><span class="std-receipt-value">${transferData.bankName}</span></div>
-        <div class="std-receipt-row"><span class="std-receipt-label">Account No.</span><span class="std-receipt-value">${transferData.accountNumber}</span></div>
-    `;
-
-    if(selectedMethod === 'wire') {
-        html += `<div class="std-receipt-row"><span class="std-receipt-label">SWIFT</span><span class="std-receipt-value">${transferData.swift}</span></div>`;
+    // 2. CAPTURE DATA
+    let recipientDisplay = "Recipient";
+    if (currentTransferType === 'internal') {
+        recipientDisplay = "Internal Account";
+    } else {
+        const input = document.getElementById('recipientInput');
+        recipientDisplay = input ? input.value : "External Account";
     }
-    
-    html += `<div class="std-receipt-row"><span class="std-receipt-label">Date</span><span class="std-receipt-value">${new Date().toLocaleDateString()}</span></div>`;
+    const amount = parseFloat(document.getElementById('amountInput').value);
+    const fromAccountNum = fromAccountSelect.value;
 
-    document.getElementById('stdReviewDetails').innerHTML = html;
-    document.getElementById('standardReviewModal').classList.add('show');
-}
-function closeStandardReview() { document.getElementById('standardReviewModal').classList.remove('show'); }
-
-// --- CONFIRM & SEND ---
-function confirmTransfer() {
-    // 1. Status Check
-    if (currentUser.status === 'frozen' || currentUser.status === 'suspended') {
-        document.getElementById('restrictionText').innerText = `Account ${currentUser.status}, contact live chat support.`;
-        document.getElementById('restrictionModal').classList.add('show');
+    if (!fromAccountNum || isNaN(amount) || amount <= 0) {
+        alert("Please enter a valid amount and select an account.");
         return;
     }
-    // 2. Auth Check
-    if (currentUser.authVerification && currentUser.authVerification.enabled) {
-        document.getElementById('authDesc').textContent = `Enter ${currentUser.authVerification.authName} to confirm.`;
-        document.getElementById('authModal').classList.add('show');
+
+    pendingTransfer = { amount, recipientDisplay, fromAccountNum };
+
+    // 3. CHECK AUTH or PROCEED
+    if (currentUser && currentUser.authVerification && currentUser.authVerification.enabled) {
+        showAuthModal();
     } else {
-        processTransaction();
+        completeTransfer();
     }
 }
 
-async function verifyAuth() {
-    const input = document.getElementById('authCodeInput').value;
-    if (input === currentUser.authVerification.authCode) {
-        document.getElementById('authModal').classList.remove('show');
-        processTransaction();
-    } else {
-        alert('Invalid Code');
-    }
-}
+// *** UPDATED: Actually calls backend API ***
+async function completeTransfer() {
+    const submitBtn = document.querySelector('.action-btn');
+    const originalText = submitBtn.textContent;
+    submitBtn.textContent = 'Processing...';
+    submitBtn.disabled = true;
 
-async function processTransaction() {
     try {
-        const payload = {
-            fromAccountId: transferData.fromAccountId,
-            toAccountNumber: transferData.type === 'internal' ? transferData.accountNumber : null,
-            amount: parseFloat(transferData.amount),
-            type: transferData.type,
-            recipientName: transferData.recipientName,
-            description: transferData.description || `${selectedMethod.toUpperCase()} Transfer`
-        };
-
-        const response = await fetch('/api/transactions', {
+        const response = await fetch('/api/user-transfer', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': localStorage.getItem('authToken') },
-            body: JSON.stringify(payload)
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                userId: sessionStorage.getItem('userId'),
+                fromAccountNum: pendingTransfer.fromAccountNum,
+                amount: pendingTransfer.amount,
+                description: `Transfer to ${pendingTransfer.recipientDisplay}`,
+                type: currentTransferType
+            })
         });
 
-        const data = await response.json();
+        const result = await response.json();
 
-        if (response.ok) {
-            closeZelleReceipt();
-            closeStandardReview();
-            document.getElementById('successModal').classList.add('show');
+        if (response.ok && result.success) {
+            formContainer.style.display = 'none';
+            showReceipt(pendingTransfer.amount, pendingTransfer.recipientDisplay);
         } else {
-            alert('Transfer Failed: ' + (data.message || 'Unknown error'));
+            alert(result.message || "Transfer failed. Please try again.");
         }
-    } catch (error) {
-        console.error(error);
-        alert('Connection Error');
+
+    } catch (err) {
+        console.error(err);
+        alert("Connection error. Please check your network.");
+    } finally {
+        submitBtn.textContent = originalText;
+        submitBtn.disabled = false;
     }
 }
 
-function closeModal(id) { document.getElementById(id).classList.remove('show'); }
+function showReceipt(amount, recipient) {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const refNum = Math.floor(100000000 + Math.random() * 900000000);
+
+    document.getElementById('receiptAmount').textContent = `$${amount.toFixed(2)}`;
+    document.getElementById('receiptTo').textContent = recipient;
+    document.getElementById('receiptDate').textContent = dateStr;
+    document.getElementById('receiptRef').textContent = refNum;
+    document.getElementById('receiptType').textContent = formHeader.textContent; 
+
+    receiptContainer.style.display = 'block';
+    window.scrollTo(0,0);
+}
+
+function resetPage() {
+    receiptContainer.style.display = 'none';
+    optionsList.style.display = 'flex';
+    pageTitle.style.display = 'block';
+    document.getElementById('activeTransferForm').reset();
+    // Ideally reload user data here to update balance in dropdown
+    location.reload(); 
+}
